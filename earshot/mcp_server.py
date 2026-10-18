@@ -22,6 +22,9 @@ time. Each result is text: the plain-language summary first (plus the listening 
 critique text for llm_critique / one row per file for realness on a folder), then compact JSON (always valid JSON;
 full=true for everything). sheet also returns the picture as an image. A tool whose module is missing from this
 install answers with a clear message instead of failing the server.
+
+Sound bank tools (no models, pure DSP): sfx_list, sfx_render (one take aimed at the picture), kit_render (a film's
+kit.json into takes + kit.lock.json); earshot.forge.sfx / earshot.forge.kit.
 """
 from __future__ import annotations
 
@@ -42,7 +45,8 @@ from .report import _clean, emit
 
 INSTRUCTIONS = """earshot gives you ears: you cannot hear, so use these tools whenever you must judge, choose or check
 sound (sound effects, music, ambience, a mix, the audio of a video). Use absolute paths.
-Loops: choose an asset = rank (many files) -> find (best moment in the winner) -> describe + realness (verify).
+Loops: choose an asset = rank (many files) -> find (best moment in the winner) -> describe (verify; + realness when
+the user wants real or professionally produced sound).
 Review a mix or film = timeline (what happens when, sync to cuts/cues) -> sheet (look at the picture) -> critique
 (scorecard vs professional launch films). A/B a change = ab on before/after renders, then timeline on the new one.
 measure = exact meters (LUFS, dBTP, noise floor), no models. llm_critique = optional Gemini opinion, uploads audio:
@@ -54,6 +58,10 @@ alternatives); cosine is raw CLAP similarity (not a probability, only comparable
 measurements most, verdicts and z next, cosine least. If realness is unavailable, say real-vs-synthetic was not
 checked; describe's AudioSet synth classes (Sine wave, Beep, Synthesizer) are weaker evidence. The first call that
 needs models takes ~20-60 s; later calls are fast (models stay loaded)."""
+
+INSTRUCTIONS += """
+Sounds for a film (no models, fast): sfx_list (the shipped bank) -> sfx_render (one take aimed at a cue: dur, apex,
+pitch) or kit_render (a film's kit.json -> takes + kit.lock.json with measured onset / peak / end per take)."""
 
 IMG_INLINE_MAX = 1600        # px, long edge of the inline copy (sent as JPEG q88: ~1/3 of the PNG bytes)
 JSON_MAX = 7000
@@ -368,11 +376,13 @@ def tool_realness(path: Annotated[str, Field(description='an audio/video file, o
                   ast: Annotated[bool, Field(description='also run the AudioSet tagger for synth-class evidence '
                                                          '(slower)')] = False,
                   full: Full = False) -> str:
-    """Real recording / professionally produced audio, or cheap code-synthesized sound (oscillators, filtered noise,
-    simple envelopes, beeps)? p_real (a probability) with a verdict and the evidence in words; files over 6 s also get
-    per-window verdicts; a folder or glob gives one row per file. Electronic music and pro sound design count as real:
-    it flags amateur procedural audio. Use on every sound before it goes into a film and on finished mixes: the user
-    rejects synthetic-sounding audio. Strong evidence, not proof: read the evidence list."""
+    """Does it sound like a real recording / professionally produced audio, or like simple code-synthesized sound
+    (oscillators, filtered noise, simple envelopes, beeps)? p_real (a probability) with a verdict and the evidence in
+    words; files over 6 s also get per-window verdicts; a folder or glob gives one row per file. Electronic music and
+    pro sound design count as real: it flags simple procedural audio. Use when the user wants real or professionally
+    produced sound (choosing recordings, checking a finished mix), or asks whether a sound reads as code-synthesized.
+    Synthesized audio may be intended: report the verdict, and treat it as a defect only when the user asked for real
+    sound. Strong evidence, not proof: read the evidence list."""
     fn = _api('realness')
     mod = sys.modules.get('earshot.realness')
     model = getattr(mod, 'MODEL_PATH', None)
@@ -476,8 +486,9 @@ def tool_critique(path: Path, video: Video = None,
 
 def tool_doctor(load: Annotated[bool, Field(description='also load both models and time one window (~20-60 s)')]
                 = False, full: Full = False) -> str:
-    """Check the earshot install: python packages, ffmpeg, cached models, CPU threads, whether an LLM key is present.
-    Use when a tool fails, or once before the first real use."""
+    """Check the earshot install: python packages, ffmpeg, the models (pinned revision, what the cache holds, whether
+    an offline flag is set), CPU threads, whether an LLM key is present. Use when a tool fails, or once before the
+    first real use."""
     from . import doctor
     return _run('doctor', dict(load=load), full, doctor.check)
 
@@ -493,6 +504,10 @@ def tool_llm_critique(path: Path,
                       model: Annotated[str | None, Field(description='Gemini model id (default '
                                                                      'EARSHOT_GEMINI_MODEL or gemini-3.8-flash)')]
                       = None,
+                      synth_intended: Annotated[bool, Field(description='true when the film uses synthesized or '
+                                                                        'procedural sound on purpose: the critique '
+                                                                        'then does not count synthesis as a flaw')]
+                      = False,
                       start: Start = None, end: End = None, full: Full = False) -> str:
     """OPTIONAL second opinion from Google Gemini (an audio LLM): rubric critique of sync, realism, mix balance,
     loudness, cheap / synthetic moments, and concrete fixes with timestamps. Use after timeline / critique when a
@@ -503,7 +518,7 @@ def tool_llm_critique(path: Path,
     from . import llm
     p = _file(path)
     kw = dict(path=p, consent=consent, prompt=prompt, video=_opt_file(video, 'video'), with_timeline=with_timeline,
-              model=model, start=start, end=end)
+              model=model, start=start, end=end, synth_intended=synth_intended)
     return _run('llm_critique', kw, full, llm.critique)
 
 
@@ -513,6 +528,79 @@ TOOLS = [  # (function, read-only, talks to the internet)
     (tool_timeline, True, False), (tool_sheet, False, False), (tool_critique, True, False),
     (tool_doctor, True, False), (tool_llm_critique, False, True),   # uploads audio: clients should ask first
 ]
+
+
+# ------------------------------------------------------------------------------------- the sound bank (no models)
+def _out_path(path, what):
+    if not path or not isinstance(path, str):
+        raise ToolFailure(f'{what}: an absolute path is required')
+    return os.path.abspath(os.path.expanduser(path.strip().strip('"')))
+
+
+def tool_sfx_list(category: Annotated[str | None, Field(description='only this category, e.g. "whoosh_fast", '
+                                                                    '"pro_impact", "typing_key", "pluck"')] = None,
+                  kind: Annotated[str | None, Field(description='only sounds for this cue kind or kit role, e.g. '
+                                                                '"whoosh" (short and long), "hit", "key", "bell"')]
+                  = None,
+                  full: Full = False) -> str:
+    """List earshot's shipped sound bank (no models, instant): every id (<category>/<member>, pluck/<name>,
+    fit/<role>/<name>) with its length, onset and peak time, the cue kinds it serves and its knobs (dur; apex for
+    the whoosh family; pitch for tonal sounds, with the native note). Use to choose sounds for a film's cues or kit
+    before sfx_render / kit_render; filter by category or kind to keep it short."""
+    from .forge import sfx
+
+    def run(category=None, kind=None):
+        r = sfx.sfx_list(category, kind)
+        lines = [r['summary']]
+        for x in r['sounds']:
+            kn = x['knobs']
+            k = [f"dur {kn['dur']}"] + (['apex'] if kn['apex'] else []) + (
+                [f"pitch {kn['pitch'].get('note')}"] if kn['pitch'] else [])
+            lines.append(f"{x['id']}: {x['dur_s']:.3f} s, peak {x['peak_s']:.3f} s; {','.join(x['kinds']) or '-'}; "
+                         f"{', '.join(k)}")
+        r['text'] = '\n'.join(lines)
+        return r
+    return _run('sfx_list', dict(category=category, kind=kind), full, run)
+
+
+def tool_sfx_render(sound: Annotated[str, Field(description='bank id from sfx_list, e.g. "whoosh_fast/crisp"')],
+                    out: Annotated[str, Field(description='absolute path of the WAV to write (24-bit)')],
+                    seed: Annotated[int | None, Field(description="noise seed for a new take (default: the sound's "
+                                                                  'own, the delivered final)')] = None,
+                    dur: Annotated[float | None, Field(description='length in seconds (exact)', gt=0)] = None,
+                    apex: Annotated[float | None, Field(description='seconds from the start to the loudest moment '
+                                                                    '(whoosh family)', gt=0)] = None,
+                    pitch: Annotated[str | None, Field(description='note name ("E5", "Eb6") or Hz ("440"), through '
+                                                                   "the recipe's own pitch parameter")] = None,
+                    peak_db: Annotated[float, Field(description='sample peak in dBFS', le=0)] = -1.0,
+                    full: Full = False) -> str:
+    """Render one sound of earshot's shipped bank to a WAV (no models, about a second), aimed at the picture:
+    exact dur, the loudest moment on apex (whooshes), a note through the recipe's own pitch parameter (never
+    resampled). Returns the measured onset, peak and end (for placing it on a cue) and the model-free audit (clicks,
+    truncation, clipping, ring, rising pitch glide). Use for a single cue or to audition a candidate before a kit."""
+    from .forge import sfx
+    p = _out_path(out, 'out')
+    return _run('sfx_render', dict(sound=sound, out=p, seed=seed, dur=dur, apex=apex, pitch=pitch, peak_db=peak_db),
+                full, sfx.sfx_render)
+
+
+def tool_kit_render(kit: Annotated[str, Field(description="absolute path of the film's kit.json (earshot kit init "
+                                                         'writes one from a preset: calm, crisp, minimal)')],
+                    out: Annotated[str, Field(description='absolute path of the folder for the takes and '
+                                                          'kit.lock.json')],
+                    force: Annotated[bool, Field(description='render every take again (default: keep the takes '
+                                                             'whose cache key and file still match)')] = False,
+                    full: Full = False) -> str:
+    """Render a film's sound kit (no models): every role's takes from the bank into WAVs plus kit.lock.json with the
+    measured onset, peak, end and loudness of each take, cached by sound, seed, edits and bank version, every take
+    audited model-free (a take that fails is re-rolled on a new seed). Use when a film's cues need sounds: the lock
+    is what a mixer or cinetic's score.py places on the cue frames."""
+    from .forge import kit as _kit
+    return _run('kit_render', dict(kit=_file(kit, 'kit'), out=_out_path(out, 'out'), force=force), full,
+                _kit.kit_render)
+
+
+TOOLS += [(tool_sfx_list, True, False), (tool_sfx_render, False, False), (tool_kit_render, False, False)]
 
 
 def _sdk():

@@ -6,7 +6,7 @@
 
 What changed in `earshot forge` during the overnight iteration of 2026-10-16, how to try it, what the held-out
 measurements say, what is still weak, and what to check before merging. The branch is not merged; `main` is
-untouched. The round-by-round log with every number is [OVERNIGHT.md](../OVERNIGHT.md). Per-category verdicts are in
+untouched. The round-by-round log with every number is [the forge v2 log](history/FORGE_V2_LOG.md). Per-category verdicts are in
 [eval/forge/results_v2r6.md](../eval/forge/results_v2r6.md) (Judge notes, round 6),
 [results_v2r5.md](../eval/forge/results_v2r5.md) (round 5),
 [results_v2r4.md](../eval/forge/results_v2r4.md) (round 4) and [results_v2r3.md](../eval/forge/results_v2r3.md)
@@ -251,7 +251,9 @@ Weakest:
 
 1. **Listen.** `out/showcase/gallery_embedded.html` for the whole set; the blind test (`out/showcase/blind_v2/`,
    20 trials, chance = 10, 15 or more right has p = 0.021) for the deciding call.
-   Update the README's "Blind test" paragraph (it describes the v1 test: 8 of 15) with the v2 result.
+   When a v2 result exists, publish it in the README's "Blind test" paragraph and in docs/SFX.md "Limits" together,
+   with the number of listeners and trials (today both say that no v2 score is published; the README's paragraph is
+   the v1 test, 8 of 15, one listener).
 2. **No media, no names.** `git ls-files | grep -iE '\.(wav|flac|mp3|ogg|m4a|mp4)$'` returns nothing (checked
    12:10); the pro films appear only as ref_1..ref_8 (the map is `out/refs_pro/films_map.json`, local; at 12:10 no
    tracked file named a film file or its folder).
@@ -266,5 +268,5 @@ Weakest:
    the recipe's REFSET as default refs). That is a user-visible change: say so in the release notes.
 6. **Scope.** Decide which results JSONs to keep, whether the seed banks ship in the package, and whether the
    `pro_*` categories (targets from one film for most) are public categories or study material.
-7. **Docs.** README forge / gallery sections, this file and OVERNIGHT.md agree on the final round's numbers
+7. **Docs.** README forge / gallery sections, this file and the forge v2 log agree on the final round's numbers
    (`results_v2r5.json`, 15:58).
